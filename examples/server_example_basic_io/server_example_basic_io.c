@@ -15,21 +15,24 @@
 
 #include "static_model.h"
 
+#include <stdint.h>
+#include <string.h>
+#include <stdbool.h>
+#include "mms_value.h"
+#include "goose_publisher.h"
+
+
 /* import IEC 61850 device model created from SCL-File */
 extern IedModel iedModel;
 
 static int running = 0;
 static IedServer iedServer = NULL;
 
-void
-sigint_handler(int signalId)
-{
+void sigint_handler(int signalId) {
     running = 0;
 }
 
-static ControlHandlerResult
-controlHandlerForBinaryOutput(void* parameter, MmsValue* value, bool test)
-{
+static ControlHandlerResult controlHandlerForBinaryOutput(void* parameter, MmsValue* value, bool test) {
     if (test)
         return CONTROL_RESULT_FAILED;
 
@@ -69,19 +72,52 @@ controlHandlerForBinaryOutput(void* parameter, MmsValue* value, bool test)
     return CONTROL_RESULT_OK;
 }
 
-
-static void
-connectionHandler (IedServer self, ClientConnection connection, bool connected, void* parameter)
-{
+static void connectionHandler (IedServer self, ClientConnection connection, bool connected, void* parameter) {
     if (connected)
         printf("Connection opened\n");
     else
         printf("Connection closed\n");
 }
 
-int
-main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
+
+
+    // GOOSE PUBLISH
+    char* interface;
+
+    if (argc > 1)
+       interface = argv[1];
+    else
+       interface = "eth0";
+
+    printf("Using interface %s\n", interface);
+
+	LinkedList dataSetValues = LinkedList_create();
+
+	LinkedList_add(dataSetValues, MmsValue_newIntegerFromInt32(1234));
+	LinkedList_add(dataSetValues, MmsValue_newBinaryTime(false));
+	LinkedList_add(dataSetValues, MmsValue_newIntegerFromInt32(5678));
+
+	CommParameters gooseCommParameters;
+
+	gooseCommParameters.appId = 1000;
+	gooseCommParameters.dstAddress[0] = 0x01;
+	gooseCommParameters.dstAddress[1] = 0x0c;
+	gooseCommParameters.dstAddress[2] = 0xcd;
+	gooseCommParameters.dstAddress[3] = 0x01;
+	gooseCommParameters.dstAddress[4] = 0x00;
+	gooseCommParameters.dstAddress[5] = 0x01;
+	gooseCommParameters.vlanId = 0;
+	gooseCommParameters.vlanPriority = 4;
+	GoosePublisher publisher = GoosePublisher_create(&gooseCommParameters, interface);
+
+	if (publisher) {
+	    GoosePublisher_setGoCbRef(publisher, "simpleIOGenericIO/LLN0$GO$gcbAnalogValues");
+	    GoosePublisher_setConfRev(publisher, 1);
+	    GoosePublisher_setDataSetRef(publisher, "simpleIOGenericIO/LLN0$AnalogValues");
+    }
+
+    // MMS SERVER
     printf("Using libIEC61850 version %s\n", LibIEC61850_getVersionString());
 
     /* Create new server configuration object */
@@ -146,46 +182,16 @@ main(int argc, char** argv)
 
     signal(SIGINT, sigint_handler);
 
-    float t = 0.f;
-
     while (running) {
-        uint64_t timestamp = Hal_getTimeInMs();
 
-        t += 0.1f;
+        if (GoosePublisher_publish(publisher, dataSetValues) == -1) {
+            printf("Error sending message!\n");
+        }
 
-        float an1 = sinf(t);
-        float an2 = sinf(t + 1.f);
-        float an3 = sinf(t + 2.f);
-        float an4 = sinf(t + 3.f);
-
-        Timestamp iecTimestamp;
-
-        Timestamp_clearFlags(&iecTimestamp);
-        Timestamp_setTimeInMilliseconds(&iecTimestamp, timestamp);
-        Timestamp_setLeapSecondKnown(&iecTimestamp, true);
-
-        /* toggle clock-not-synchronized flag in timestamp */
-        if (((int) t % 2) == 0)
-            Timestamp_setClockNotSynchronized(&iecTimestamp, true);
-
-        IedServer_lockDataModel(iedServer);
-
-        IedServer_updateTimestampAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn1_t, &iecTimestamp);
-        IedServer_updateFloatAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn1_mag_f, an1);
-
-        IedServer_updateTimestampAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn2_t, &iecTimestamp);
-        IedServer_updateFloatAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn2_mag_f, an2);
-
-        IedServer_updateTimestampAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn3_t, &iecTimestamp);
-        IedServer_updateFloatAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn3_mag_f, an3);
-
-        IedServer_updateTimestampAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn4_t, &iecTimestamp);
-        IedServer_updateFloatAttributeValue(iedServer, IEDMODEL_GenericIO_GGIO1_AnIn4_mag_f, an4);
-
-        IedServer_unlockDataModel(iedServer);
-
-        Thread_sleep(100);
+        Thread_sleep(1000);
     }
+    GoosePublisher_destroy(publisher);
+	LinkedList_destroyDeep(dataSetValues, (LinkedListValueDeleteFunction) MmsValue_delete);
 
     /* stop MMS server - close TCP server socket and all client sockets */
     IedServer_stop(iedServer);
